@@ -59,7 +59,7 @@ jobs:
           name: windows-amd64-server.exe
           path: windows-amd64-server.exe
 
-  build-amd64:
+  build-linux-amd64:
     runs-on: ubuntu-latest
 
     steps:
@@ -84,7 +84,7 @@ jobs:
         with:
           name: linux-amd64-server
           path: linux-amd64-server
-  build-arm64:
+  build-linux-arm64:
     runs-on: ubuntu-latest
 
     steps:
