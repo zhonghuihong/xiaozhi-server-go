@@ -27,7 +27,7 @@ jobs:
             -v "${{ github.workspace }}:/src" \
             -w /src \
             golang:1.24.2-alpine /bin/sh -c '
-              apk add --no-cache musl-dev gcc && go mod tidy && ls -la && /bin/sh ./build/build-linux-arm64.sh
+              apk add --no-cache musl-dev gcc pkg-config && go mod tidy && ls -la && /bin/sh ./build/build-linux-arm64.sh
             '
 
       - name: Upload ARM64 binary
