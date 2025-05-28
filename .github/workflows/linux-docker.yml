@@ -29,6 +29,7 @@ jobs:
             golang:1.24.2-alpine /bin/sh -c "
               apk add --no-cache musl-dev gcc && \
               go mod tidy && \
+              ls -la && \
               cd src && CGO_CFLAGS="-I opus/include" CGO_LDFLAGS="-L opus/library/linux/arm64 -lopus -lm" CGO_ENABLED=1 GOOS=linux CC=musl-cc GOARCH=arm64 go build -ldflags='-extldflags "-static"' -o ../linux-arm64-server 
             "
 
