@@ -51,13 +51,13 @@ jobs:
           GOARCH: ${{ env.GOARCH }}
           CC: ${{ env.CC }}
         run: |
-          go mod tidy && cd src && go build -v -ldflags "-extldflags '-static'" -o ../window-amd64-server.exe
+          go mod tidy && cd src && go build -v -ldflags "-extldflags '-static'" -o ../windows-amd64-server.exe
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
         with:
-          name: window-amd64-server.exe
-          path: window-amd64-server.exe
+          name: windows-amd64-server.exe
+          path: windows-amd64-server.exe
 
   build-amd64:
     runs-on: ubuntu-latest
