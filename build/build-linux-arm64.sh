@@ -1,0 +1,1 @@
+cd src && CGO_CFLAGS="-I opus/include" CGO_LDFLAGS="-L opus/library/linux/arm64 -lopus -lm" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -ldflags="-extldflags "-static"" -o ../linux-arm64-server
