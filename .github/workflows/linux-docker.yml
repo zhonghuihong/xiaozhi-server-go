@@ -26,9 +26,9 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -v "${{ github.workspace }}:/src" \
             -w /src \
-            golang:1.24.2-alpine /bin/sh -c "
-              apk add --no-cache musl-dev gcc && go mod tidy && ls -la && cd src && ls -la && CGO_CFLAGS="-I opus/include" CGO_LDFLAGS="-L opus/library/linux/arm64 -lopus -lm" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -ldflags='-extldflags "-static"' -o ../linux-arm64-server 
-            "
+            golang:1.24.2-alpine /bin/sh -c '
+              apk add --no-cache musl-dev gcc && go mod tidy && ls -la && cd src && ls -la && CGO_CFLAGS="-I opus/include" CGO_LDFLAGS="-L opus/library/linux/arm64 -lopus -lm" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -ldflags="-extldflags \"-static\"" -o ../linux-arm64-server 
+            '
 
       - name: Upload ARM64 binary
         uses: actions/upload-artifact@v4
