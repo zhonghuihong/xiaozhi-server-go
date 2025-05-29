@@ -32,7 +32,7 @@ jobs:
           wget https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
           unzip android-ndk-${NDK_VERSION}-linux.zip
           echo "NDK_DIR=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-          echo "TOOLCHAIN=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$PWD/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
       - name: Download libopus
         run: |
