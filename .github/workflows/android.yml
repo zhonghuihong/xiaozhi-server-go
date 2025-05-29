@@ -67,7 +67,7 @@ jobs:
           echo "GOARCH=arm64" >> $GITHUB_ENV
           echo "CC=$TOOLCHAIN/bin/aarch64-linux-android$ANDROID_API-clang" >> $GITHUB_ENV
           echo "CGO_CFLAGS=--sysroot=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
-          echo "CGO_LDFLAGS=-L$HOME/libopus-prefix/lib -lopus" >> $GITHUB_ENV
+          echo "CGO_LDFLAGS=-L$HOME/libopus-prefix/lib -lopus -L$TOOLCHAIN/sysroot -lm" >> $GITHUB_ENV
 
       - name: Build Go binary for Android
         run: |
