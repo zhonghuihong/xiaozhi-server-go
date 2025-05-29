@@ -84,7 +84,7 @@ jobs:
           path: linux-amd64-server
 
   build-linux-arm64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - name: Checkout code
