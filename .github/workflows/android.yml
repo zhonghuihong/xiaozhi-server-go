@@ -60,13 +60,7 @@ jobs:
           make install
 
       - name: Set up pkg-config for libopus
-        run: |
-#          mkdir -p $HOME/libopus-prefix/lib/pkgconfig
-#          cp opus-${OPUS_VERSION}/.libs/libopus.so* $HOME/libopus-prefix/lib/
-#          cp opus-${OPUS_VERSION}/opus.pc $HOME/libopus-prefix/lib/pkgconfig/
-#          mkdir -p $HOME/libopus-prefix/include/
-#          cp -r opus-${OPUS_VERSION}/include/* $HOME/libopus-prefix/include/
-          
+        run: |          
           echo "PKG_CONFIG_PATH=$HOME/libopus-prefix/lib/pkgconfig" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
           echo "GOOS=android" >> $GITHUB_ENV
