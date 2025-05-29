@@ -49,21 +49,23 @@ jobs:
           
           cd opus-${OPUS_VERSION}
           ./configure \
+            --prefix=$HOME/libopus-prefix \
             --host=$TARGET \
             --enable-static \
             --enable-shared \
             CC=$CC \
             AR=$AR \
             CFLAGS="--sysroot=$TOOLCHAIN/sysroot"
-          make
+          make -j$(nproc)
+          make install
 
       - name: Set up pkg-config for libopus
         run: |
-          mkdir -p $HOME/libopus-prefix/lib/pkgconfig
-          cp opus-${OPUS_VERSION}/.libs/libopus.so* $HOME/libopus-prefix/lib/
-          cp opus-${OPUS_VERSION}/opus.pc $HOME/libopus-prefix/lib/pkgconfig/
-          mkdir -p $HOME/libopus-prefix/include/
-          cp -r opus-${OPUS_VERSION}/include/* $HOME/libopus-prefix/include/
+#          mkdir -p $HOME/libopus-prefix/lib/pkgconfig
+#          cp opus-${OPUS_VERSION}/.libs/libopus.so* $HOME/libopus-prefix/lib/
+#          cp opus-${OPUS_VERSION}/opus.pc $HOME/libopus-prefix/lib/pkgconfig/
+#          mkdir -p $HOME/libopus-prefix/include/
+#          cp -r opus-${OPUS_VERSION}/include/* $HOME/libopus-prefix/include/
           
           echo "PKG_CONFIG_PATH=$HOME/libopus-prefix/lib/pkgconfig" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
