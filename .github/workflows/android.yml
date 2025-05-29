@@ -73,7 +73,7 @@ jobs:
         run: |
           pkg-config --cflags opus
           pkg-config --libs opus
-          cd src && go build -v -o ../android-arm64-server
+          cd src && go build -v -ldflags="-s -w" -o ../android-arm64-server
 
       - name: Upload ARM64 binary
         uses: actions/upload-artifact@v4
