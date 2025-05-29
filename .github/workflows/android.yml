@@ -52,7 +52,7 @@ jobs:
             --prefix=$HOME/libopus-prefix \
             --host=$TARGET \
             --enable-static \
-            --enable-shared \
+            --disable-shared \
             CC=$CC \
             AR=$AR \
             CFLAGS="--sysroot=$TOOLCHAIN/sysroot"
@@ -74,3 +74,9 @@ jobs:
           pkg-config --cflags opus
           pkg-config --libs opus
           cd src && go build -v -o ../android-arm64-server
+
+      - name: Upload ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-server
+          path: android-arm64-server
