@@ -233,6 +233,20 @@ jobs:
           path: artifacts
           flat: true
 
+      - name: Download Android ARM64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: android-arm64-server
+          path: artifacts
+          flat: true
+
+      - name: Download Android ARM binary
+        uses: actions/download-artifact@v4
+        with:
+          name: android-arm-server
+          path: artifacts
+          flat: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -241,6 +255,8 @@ jobs:
           draft:   false
           prerelease: false
           files: |
+            artifacts/android-arm64-server
+            artifacts/android-arm-server
             artifacts/windows-amd64-server.exe
             artifacts/windows-amd64-server-upx.exe
             artifacts/linux-amd64-server
