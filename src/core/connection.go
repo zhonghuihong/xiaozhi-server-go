@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -40,11 +41,7 @@ type ConnectionHandler struct {
 	}
 
 	// 会话相关
-	sessionID    string
-	headers      map[string]string
-	clientIP     string
-	clientIPInfo map[string]interface{}
-
+	sessionID string
 	// 客户端音频相关
 	clientAudioFormat        string
 	clientAudioSampleRate    int
@@ -56,8 +53,6 @@ type ConnectionHandler struct {
 	serverAudioChannels      int
 	serverAudioFrameDuration int
 
-	// 状态标志
-	clientAbort      bool
 	clientListenMode string
 	isDeviceVerified bool
 	closeAfterChat   bool
@@ -69,10 +64,9 @@ type ConnectionHandler struct {
 	opusDecoder *utils.OpusDecoder // Opus解码器
 
 	// 对话相关
-	dialogueManager      *chat.DialogueManager
-	tts_first_text_index int
-	tts_last_text_index  int
-	client_asr_text      string // 客户端ASR文本
+	dialogueManager     *chat.DialogueManager
+	tts_last_text_index int
+	client_asr_text     string // 客户端ASR文本
 
 	// 并发控制
 	stopChan         chan struct{}
@@ -89,11 +83,12 @@ type ConnectionHandler struct {
 	audioMessagesQueue chan struct {
 		filepath  string
 		text      string
-		round    int // 轮次
+		round     int // 轮次
 		textIndex int
 	}
 
-	talkRound int // 轮次计数
+	talkRound      int       // 轮次计数
+	roundStartTime time.Time // 轮次开始时间
 	// functions
 	functionRegister *function.FunctionRegistry
 	mcpManager       *mcp.Manager
@@ -120,20 +115,19 @@ func NewConnectionHandler(
 		clientTextQueue:  make(chan string, 100),
 		ttsQueue: make(chan struct {
 			text      string
-			round	 int // 轮次
+			round     int // 轮次
 			textIndex int
 		}, 100),
 		audioMessagesQueue: make(chan struct {
 			filepath  string
 			text      string
-			round	int // 轮次
+			round     int // 轮次
 			textIndex int
 		}, 100),
 
-		tts_last_text_index:  -1,
-		tts_first_text_index: -1,
+		tts_last_text_index: -1,
 
-		talkRound : 0,
+		talkRound: 0,
 
 		serverAudioFormat:        "opus", // 默认使用Opus格式
 		serverAudioSampleRate:    24000,
@@ -321,7 +315,7 @@ func (h *ConnectionHandler) processClientTextMessage(ctx context.Context, text s
 	case "hello":
 		return h.handleHelloMessage(msgMap)
 	case "abort":
-		return h.handleAbortMessage()
+		return h.clientAbortChat()
 	case "listen":
 		return h.handleListenMessage(msgMap)
 	case "iot":
@@ -405,10 +399,12 @@ func (h *ConnectionHandler) handleHelloMessage(msgMap map[string]interface{}) er
 	return nil
 }
 
-// handleAbortMessage 处理中止消息
-func (h *ConnectionHandler) handleAbortMessage() error {
-	h.clientAbort = true
+// clientAbortChat 处理中止消息
+func (h *ConnectionHandler) clientAbortChat() error {
+	h.logger.Info("收到客户端中止消息，停止语音识别")
 	h.stopServerSpeak()
+	h.sendTTSMessage("stop", "", 0)
+	h.clearSpeakStatus()
 	return nil
 }
 
@@ -430,14 +426,14 @@ func (h *ConnectionHandler) handleListenMessage(msgMap map[string]interface{}) e
 
 	switch state {
 	case "start":
+		if h.client_asr_text != "" && h.clientListenMode == "manual" {
+			h.clientAbortChat()
+		}
 		h.clientVoiceStop = false
 		h.client_asr_text = ""
 	case "stop":
 		h.clientVoiceStop = true
 		h.logger.Info("客户端停止语音识别")
-		if h.clientListenMode == "manual" {
-			h.providers.asr.Finalize()
-		}
 	case "detect":
 		// 检查是否包含图片数据
 		imageBase64, hasImage := msgMap["image"].(string)
@@ -482,11 +478,11 @@ func (h *ConnectionHandler) handleListenMessage(msgMap map[string]interface{}) e
 
 // handleImageWithText 处理包含图片和文本的消息
 func (h *ConnectionHandler) handleImageWithText(ctx context.Context, imageData image.ImageData, text string) error {
-	 // 增加对话轮次
-	 h.talkRound++
-	 currentRound := h.talkRound
-	 h.logger.Info(fmt.Sprintf("开始新的图片对话轮次: %d", currentRound))
-	 
+	// 增加对话轮次
+	h.talkRound++
+	currentRound := h.talkRound
+	h.logger.Info(fmt.Sprintf("开始新的图片对话轮次: %d", currentRound))
+
 	// 判断是否需要验证
 	if h.isNeedAuth() {
 		if err := h.checkAndBroadcastAuthCode(); err != nil {
@@ -599,14 +595,15 @@ func (h *ConnectionHandler) sendEmotionMessage(emotion string) error {
 func (h *ConnectionHandler) handleChatMessage(ctx context.Context, text string) error {
 	if text == "" {
 		h.logger.Warn("收到空聊天消息，忽略")
+		h.clientAbortChat()
 		return nil
 	}
 
-	 // 增加对话轮次
-	 h.talkRound++
-	 currentRound := h.talkRound
-	 h.logger.Info(fmt.Sprintf("开始新的对话轮次: %d", currentRound))
-	 
+	// 增加对话轮次
+	h.talkRound++
+	h.roundStartTime = time.Now()
+	currentRound := h.talkRound
+	h.logger.Info(fmt.Sprintf("开始新的对话轮次: %d", currentRound))
 
 	// 判断是否需要验证
 	if h.isNeedAuth() {
@@ -733,6 +730,7 @@ func (h *ConnectionHandler) handleChatMessage(ctx context.Context, text string) 
 }
 
 func (h *ConnectionHandler) genResponseByLLM(ctx context.Context, messages []providers.Message, round int) error {
+	llmStartTime := time.Now()
 	h.logger.FormatInfo("开始生成LLM回复, round:%d 打印message", round)
 	for _, msg := range messages {
 		msg.Print()
@@ -788,20 +786,27 @@ func (h *ConnectionHandler) genResponseByLLM(ctx context.Context, messages []pro
 			if !toolCallFlag {
 				responseMessage = append(responseMessage, content)
 			}
-
-			if h.clientAbort {
-				break
-			}
-
 			// 处理分段
 			fullText := joinStrings(responseMessage)
 			currentText := fullText[processedChars:]
 
 			// 按标点符号分割
-			if segment, chars := splitAtLastPunctuation(currentText); chars > 0 {
+			if segment, chars := utils.SplitAtLastPunctuation(currentText); chars > 0 {
 				textIndex++
-				h.recode_first_last_text(segment, textIndex)
-				h.SpeakAndPlay(segment, textIndex, round)
+				if textIndex == 1 {
+					now := time.Now()
+					llmSpentTime := now.Sub(llmStartTime)
+					h.logger.Info(fmt.Sprintf("LLM回复耗时 %s 生成第一句话【%s】, round: %d", llmSpentTime, segment, round))
+				} else {
+					h.logger.Info(fmt.Sprintf("LLM回复分段: %s, index: %d, round:%d", segment, textIndex, round))
+				}
+
+				err := h.SpeakAndPlay(segment, textIndex, round)
+				if err == nil {
+					h.tts_last_text_index = textIndex
+				} else {
+					h.logger.Error(fmt.Sprintf("播放LLM回复分段失败: %v", err))
+				}
 				processedChars += chars
 			}
 		}
@@ -859,8 +864,11 @@ func (h *ConnectionHandler) genResponseByLLM(ctx context.Context, messages []pro
 	remainingText := joinStrings(responseMessage)[processedChars:]
 	if remainingText != "" {
 		textIndex++
-		h.recode_first_last_text(remainingText, textIndex)
-		h.SpeakAndPlay(remainingText, textIndex, round)
+		h.logger.Info(fmt.Sprintf("LLM回复分段[剩余文本]: %s, index: %d, round:%d", remainingText, textIndex, round))
+		err := h.SpeakAndPlay(remainingText, textIndex, round)
+		if err == nil {
+			h.tts_last_text_index = textIndex
+		}
 	}
 
 	// 分析回复并发送相应的情绪
@@ -937,7 +945,7 @@ func (h *ConnectionHandler) handleFunctionResult(result types.ActionResponse, fu
 		} else {
 			h.logger.Error(fmt.Sprintf("函数调用结果解析失败: %v", result.Result))
 			// 发送错误消息
-			errorMessage := fmt.Sprintf("函数调用结果解析失败")
+			errorMessage := fmt.Sprintf("函数调用结果解析失败 %v", result.Result)
 			h.SpeakAndPlay(errorMessage, textIndex, h.talkRound)
 		}
 	}
@@ -1000,30 +1008,30 @@ func (h *ConnectionHandler) sendAudioMessage(filepath string, text string, textI
 		return
 	}
 	// 检查轮次
-    if round != h.talkRound {
-        h.logger.Info(fmt.Sprintf("sendAudioMessage: 跳过过期轮次的音频: 任务轮次=%d, 当前轮次=%d, 文本=%s", 
-            round, h.talkRound, text))
-        // 即使跳过，也要根据配置删除音频文件
-        if h.config.DeleteAudio {
-            if err := os.Remove(filepath); err != nil {
-                h.logger.Error(fmt.Sprintf("删除跳过的音频文件失败: %v", err))
-            } else {
-                h.logger.Info(fmt.Sprintf("已删除跳过的音频文件: %s", filepath))
-            }
-        }
-        return
-    }
+	if round != h.talkRound {
+		h.logger.Info(fmt.Sprintf("sendAudioMessage: 跳过过期轮次的音频: 任务轮次=%d, 当前轮次=%d, 文本=%s",
+			round, h.talkRound, text))
+		// 即使跳过，也要根据配置删除音频文件
+		if h.config.DeleteAudio {
+			if err := os.Remove(filepath); err != nil {
+				h.logger.Error(fmt.Sprintf("删除跳过的音频文件失败: %v", err))
+			} else {
+				h.logger.Info(fmt.Sprintf("已删除跳过的音频文件: %s", filepath))
+			}
+		}
+		return
+	}
 
 	if atomic.LoadInt32(&h.serverVoiceStop) == 1 { // 服务端语音停止
 		h.logger.Info(fmt.Sprintf("sendAudioMessage 服务端语音停止, 不再发送音频数据：%s", text))
 		// 服务端语音停止时也要根据配置删除音频文件
-        if h.config.DeleteAudio {
-            if err := os.Remove(filepath); err != nil {
-                h.logger.Error(fmt.Sprintf("删除停止的音频文件失败: %v", err))
-            } else {
-                h.logger.Info(fmt.Sprintf("已删除停止的音频文件: %s", filepath))
-            }
-        }
+		if h.config.DeleteAudio {
+			if err := os.Remove(filepath); err != nil {
+				h.logger.Error(fmt.Sprintf("删除停止的音频文件失败: %v", err))
+			} else {
+				h.logger.Info(fmt.Sprintf("已删除停止的音频文件: %s", filepath))
+			}
+		}
 		return
 	}
 
@@ -1033,10 +1041,11 @@ func (h *ConnectionHandler) sendAudioMessage(filepath string, text string, textI
 			if err := os.Remove(filepath); err != nil {
 				h.logger.Error(fmt.Sprintf("删除TTS音频文件失败: %v", err))
 			} else {
-				h.logger.Info(fmt.Sprintf("已删除TTS音频文件: %s", filepath))
+				h.logger.Debug(fmt.Sprintf("已删除TTS音频文件: %s", filepath))
 			}
 		}
-		
+
+		h.logger.Info(fmt.Sprintf("TTS音频发送完成: %s, 索引: %d/%d", text, textIndex, h.tts_last_text_index))
 		if textIndex == h.tts_last_text_index {
 			h.sendTTSMessage("stop", "", textIndex)
 			h.clearSpeakStatus()
@@ -1063,54 +1072,24 @@ func (h *ConnectionHandler) sendAudioMessage(filepath string, text string, textI
 		}
 	}
 
-	//fmt.Println("音频时长:", duration)
-
 	// 发送TTS状态开始通知
 	if err := h.sendTTSMessage("sentence_start", text, textIndex); err != nil {
 		h.logger.Error(fmt.Sprintf("发送TTS开始状态失败: %v", err))
 		return
 	}
 
-	// 发送音频数据
-	for _, chunk := range audioData {
-		if err := h.conn.WriteMessage(2, chunk); err != nil {
-			h.logger.Error(fmt.Sprintf("发送Opus音频数据失败: %v", err))
-			return
-		}
+	if textIndex == 1 {
+		now := time.Now()
+		spentTime := now.Sub(h.roundStartTime)
+		h.logger.Info(fmt.Sprintf("回复首句耗时 %s 第一句话【%s】, round: %d", spentTime, text, round))
 	}
-	h.logger.Info(fmt.Sprintf("TTS发送(%s): \"%s\" (索引:%d，时长:%f)", h.serverAudioFormat, text, textIndex, duration))
-	now := time.Now()
+	h.logger.Info(fmt.Sprintf("TTS发送(%s): \"%s\" (索引:%d/%d，时长:%f，帧数:%d)", h.serverAudioFormat, text, textIndex, h.tts_last_text_index, duration, len(audioData)))
 
-	//time.Sleep(time.Duration(duration*1000) * time.Millisecond)
-	//spent := time.Since(now)
-	//h.logger.Info(fmt.Sprintf("%s音频数据发送完成, 已休眠: %v", h.serverAudioFormat, spent))
-	// 可中断的休眠等待
-	sleepDuration := time.Duration(duration*1000) * time.Millisecond
-	ticker := time.NewTicker(100 * time.Millisecond) // 每100ms检查一次
-	defer ticker.Stop()
-	
-	for {
-		select {
-		case <-ticker.C:
-			// 检查是否被打断或轮次变化
-			if atomic.LoadInt32(&h.serverVoiceStop) == 1 || round != h.talkRound {
-				spent := time.Since(now)
-				h.logger.Info(fmt.Sprintf("%s音频数据发送被中断, 已休眠: %v", h.serverAudioFormat, spent))
-				goto endSleep
-			}
-			// 检查是否已休眠足够时间
-			if time.Since(now) >= sleepDuration {
-				spent := time.Since(now)
-				h.logger.Info(fmt.Sprintf("%s音频数据发送完成, 已休眠: %v", h.serverAudioFormat, spent))
-				goto endSleep
-			}
-		case <-h.stopChan:
-			// 连接关闭
-			return
-		}
+	// 分时发送音频数据
+	if err := h.sendAudioFrames(audioData, text, textIndex, round); err != nil {
+		h.logger.Error(fmt.Sprintf("分时发送音频数据失败: %v", err))
+		return
 	}
-		
-endSleep:
 
 	// 发送TTS状态结束通知
 	if err := h.sendTTSMessage("sentence_end", text, textIndex); err != nil {
@@ -1119,9 +1098,123 @@ endSleep:
 	}
 }
 
+// sendAudioFrames 分时发送音频帧，避免撑爆客户端缓冲区
+func (h *ConnectionHandler) sendAudioFrames(audioData [][]byte, text string, textIndex int, round int) error {
+	if len(audioData) == 0 {
+		return nil
+	}
+
+	// 流控参数
+	frameDuration := time.Duration(h.serverAudioFrameDuration) * time.Millisecond // 帧时长，默认60ms
+	startTime := time.Now()
+	playPosition := 0 // 播放位置（毫秒）
+
+	// 预缓冲：发送前几帧，提升播放流畅度
+	preBufferFrames := 3
+	if len(audioData) < preBufferFrames {
+		preBufferFrames = len(audioData)
+	}
+
+	// 发送预缓冲帧
+	for i := 0; i < preBufferFrames; i++ {
+		// 检查是否被打断
+		if atomic.LoadInt32(&h.serverVoiceStop) == 1 || round != h.talkRound {
+			h.logger.Info(fmt.Sprintf("音频发送被中断(预缓冲阶段): 帧=%d/%d, 文本=%s", i+1, preBufferFrames, text))
+			return nil
+		}
+
+		if err := h.conn.WriteMessage(2, audioData[i]); err != nil {
+			return fmt.Errorf("发送预缓冲音频帧失败: %v", err)
+		}
+		playPosition += h.serverAudioFrameDuration
+	}
+
+	// 发送剩余音频帧
+	remainingFrames := audioData[preBufferFrames:]
+	for i, chunk := range remainingFrames {
+		// 检查是否被打断或轮次变化
+		if atomic.LoadInt32(&h.serverVoiceStop) == 1 || round != h.talkRound {
+			h.logger.Info(fmt.Sprintf("音频发送被中断: 帧=%d/%d, 文本=%s", i+preBufferFrames+1, len(audioData), text))
+			return nil
+		}
+
+		// 检查连接是否关闭
+		select {
+		case <-h.stopChan:
+			return nil
+		default:
+		}
+
+		// 计算预期发送时间
+		expectedTime := startTime.Add(time.Duration(playPosition) * time.Millisecond)
+		currentTime := time.Now()
+		delay := expectedTime.Sub(currentTime)
+
+		// 如果需要延迟，则等待
+		if delay > 0 {
+			// 使用可中断的延迟
+			checkInterval := frameDuration / 2 // 使用帧时长的一半作为检查间隔
+			if checkInterval < 10*time.Millisecond {
+				checkInterval = 10 * time.Millisecond // 最小10ms
+			}
+
+			select {
+			case <-time.After(delay):
+				// 正常延迟结束
+			case <-h.stopChan:
+				// 连接关闭
+				return nil
+			case <-time.After(checkInterval):
+				// 定期检查中断条件
+				if atomic.LoadInt32(&h.serverVoiceStop) == 1 || round != h.talkRound {
+					h.logger.Info(fmt.Sprintf("音频发送在延迟中被中断: 帧=%d/%d, 文本=%s", i+preBufferFrames+1, len(audioData), text))
+					return nil
+				}
+				// 如果还需要继续延迟，重新计算剩余时间
+				newCurrentTime := time.Now()
+				remainingDelay := expectedTime.Sub(newCurrentTime)
+				if remainingDelay > 0 {
+					// 递归式等待剩余时间
+					for remainingDelay > 0 {
+						select {
+						case <-time.After(minDuration(remainingDelay, checkInterval)):
+							if atomic.LoadInt32(&h.serverVoiceStop) == 1 || round != h.talkRound {
+								h.logger.Info(fmt.Sprintf("音频发送在延迟中被中断: 帧=%d/%d, 文本=%s", i+preBufferFrames+1, len(audioData), text))
+								return nil
+							}
+							newCurrentTime = time.Now()
+							remainingDelay = expectedTime.Sub(newCurrentTime)
+						case <-h.stopChan:
+							return nil
+						}
+					}
+				}
+			}
+		}
+
+		// 发送音频帧
+		if err := h.conn.WriteMessage(2, chunk); err != nil {
+			return fmt.Errorf("发送音频帧失败: %v", err)
+		}
+
+		playPosition += h.serverAudioFrameDuration
+	}
+
+	h.logger.Info(fmt.Sprintf("音频帧发送完成: 总帧数=%d, 总时长=%dms, 文本=%s", len(audioData), playPosition, text))
+	return nil
+}
+
+// 辅助函数：返回两个时间间隔中较小的一个
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // 服务端打断说话
 func (h *ConnectionHandler) stopServerSpeak() {
-	h.logger.Info("stopServerSpeak 服务端停止说话")
+	h.logger.Info("服务端停止说话")
 	atomic.StoreInt32(&h.serverVoiceStop, 1)
 	// 终止tts任务，不再继续将文本加入到tts队列，清空ttsQueue队列
 	for {
@@ -1159,10 +1252,12 @@ clearAudioQueue:
 
 // processTTSTask 处理单个TTS任务
 func (h *ConnectionHandler) processTTSTask(text string, textIndex int, round int) {
+	ttsStartTime := time.Now()
 	// 过滤表情
 	text = utils.RemoveAllEmoji(text)
 
 	if text == "" {
+		h.logger.Warn(fmt.Sprintf("收到空文本，无法合成语音, 索引: %d", textIndex))
 		return
 	}
 
@@ -1186,27 +1281,39 @@ func (h *ConnectionHandler) processTTSTask(text string, textIndex int, round int
 		}
 		return
 	}
+
+	if textIndex == 1 {
+		now := time.Now()
+		ttsSpentTime := now.Sub(ttsStartTime)
+		h.logger.Info(fmt.Sprintf("TTS转换耗时: %s, 文本: %s, 索引: %d", ttsSpentTime, text, textIndex))
+	}
+
 	h.audioMessagesQueue <- struct {
 		filepath  string
 		text      string
-		round    int
+		round     int
 		textIndex int
 	}{filepath, text, round, textIndex}
 }
 
 // speakAndPlay 合成并播放语音
 func (h *ConnectionHandler) SpeakAndPlay(text string, textIndex int, round int) error {
+	originText := text // 保存原始文本用于日志
+	text = utils.RemoveAllEmoji(text)
+	text = utils.RemoveMarkdownSyntax(text) // 移除Markdown语法
 	if text == "" {
-		return nil
+		h.logger.FormatWarn("SpeakAndPlay 收到空文本，无法合成语音, %d, text:%s.", textIndex, originText)
+		return errors.New("收到空文本，无法合成语音")
 	}
+
 	if atomic.LoadInt32(&h.serverVoiceStop) == 1 { // 服务端语音停止
 		h.logger.Info(fmt.Sprintf("speakAndPlay 服务端语音停止, 不再发送音频数据：%s", text))
-		return nil
+		return errors.New("服务端语音已停止，无法合成语音")
 	}
 	// 将任务加入队列，不阻塞当前流程
 	h.ttsQueue <- struct {
 		text      string
-		round    int
+		round     int
 		textIndex int
 	}{text, round, textIndex}
 
@@ -1255,17 +1362,7 @@ func (h *ConnectionHandler) sendSTTMessage(text string) error {
 func (h *ConnectionHandler) clearSpeakStatus() {
 	h.logger.Info("清除服务端讲话状态 ")
 	h.tts_last_text_index = -1
-	h.tts_first_text_index = -1
 	h.providers.asr.Reset() // 重置ASR状态
-}
-
-func (h *ConnectionHandler) recode_first_last_text(text string, text_index int) {
-	if h.tts_first_text_index == -1 {
-		h.logger.Info(fmt.Sprintf("大模型说出第一句话:%s", text))
-		h.tts_first_text_index = text_index
-	}
-
-	h.tts_last_text_index = text_index
 }
 
 // joinStrings 连接字符串切片
@@ -1275,24 +1372,6 @@ func joinStrings(strs []string) string {
 		result += s
 	}
 	return result
-}
-
-// splitAtLastPunctuation 在最后一个标点符号处分割文本
-func splitAtLastPunctuation(text string) (string, int) {
-	punctuations := []string{"。", "？", "！", "；", "："}
-	lastIndex := -1
-
-	for _, punct := range punctuations {
-		if idx := strings.LastIndex(text, punct); idx > lastIndex {
-			lastIndex = idx
-		}
-	}
-
-	if lastIndex == -1 {
-		return "", 0
-	}
-
-	return text[:lastIndex+len("。")], lastIndex + len("。")
 }
 
 // sendHelloMessage 发送欢迎消息
@@ -1328,7 +1407,7 @@ func (h *ConnectionHandler) closeOpusDecoder() {
 // Close 清理资源
 func (h *ConnectionHandler) Close() {
 	close(h.stopChan)
-	
+
 	// 清理待处理的音频文件
 	if h.config.DeleteAudio {
 		// 清理TTS队列中的任务（这些任务还没有生成音频文件，无需删除）
@@ -1340,7 +1419,7 @@ func (h *ConnectionHandler) Close() {
 				goto clearAudioQueue
 			}
 		}
-		
+
 	clearAudioQueue:
 		// 清理音频消息队列中的文件
 		for {
@@ -1359,7 +1438,7 @@ func (h *ConnectionHandler) Close() {
 			}
 		}
 	}
-	
+
 closeChannels:
 	close(h.clientAudioQueue)
 	close(h.clientTextQueue)
@@ -1419,9 +1498,9 @@ func (h *ConnectionHandler) extractImageFormat(url string) string {
 // handleImageMessage 处理图片消息
 func (h *ConnectionHandler) handleImageMessage(ctx context.Context, msgMap map[string]interface{}) error {
 	// 增加对话轮次
-    h.talkRound++
-    currentRound := h.talkRound
-    h.logger.Info(fmt.Sprintf("开始新的图片对话轮次: %d", currentRound))
+	h.talkRound++
+	currentRound := h.talkRound
+	h.logger.Info(fmt.Sprintf("开始新的图片对话轮次: %d", currentRound))
 
 	// 判断是否需要验证
 	if h.isNeedAuth() {
@@ -1553,20 +1632,17 @@ func (h *ConnectionHandler) genResponseByVLLM(ctx context.Context, messages []pr
 		}
 
 		responseMessage = append(responseMessage, response)
-
-		if h.clientAbort {
-			break
-		}
-
 		// 处理分段
 		fullText := joinStrings(responseMessage)
 		currentText := fullText[processedChars:]
 
 		// 按标点符号分割
-		if segment, chars := splitAtLastPunctuation(currentText); chars > 0 {
+		if segment, chars := utils.SplitAtLastPunctuation(currentText); chars > 0 {
 			textIndex++
-			h.recode_first_last_text(segment, textIndex)
-			h.SpeakAndPlay(segment, textIndex, round)
+			err := h.SpeakAndPlay(segment, textIndex, round)
+			if err == nil {
+				h.tts_last_text_index = textIndex
+			}
 			processedChars += chars
 		}
 	}
@@ -1575,8 +1651,10 @@ func (h *ConnectionHandler) genResponseByVLLM(ctx context.Context, messages []pr
 	remainingText := joinStrings(responseMessage)[processedChars:]
 	if remainingText != "" {
 		textIndex++
-		h.recode_first_last_text(remainingText, textIndex)
-		h.SpeakAndPlay(remainingText, textIndex, round)
+		err := h.SpeakAndPlay(remainingText, textIndex, round)
+		if err == nil {
+			h.tts_last_text_index = textIndex
+		}
 	}
 
 	// 获取完整回复内容
