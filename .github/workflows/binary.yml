@@ -193,8 +193,6 @@ jobs:
 
       - name: Build Go binary for Android
         run: |
-          pkg-config --cflags opus
-          pkg-config --libs opus
           cd src && go build -v -ldflags="-s -w" -o ../android-${{ matrix.arch }}-server
 
       - name: Upload Android binary
@@ -217,35 +215,30 @@ jobs:
         with:
           name: windows-binaries
           path: artifacts
-          flat: true
 
       - name: Download Linux AMD64 binaries
         uses: actions/download-artifact@v4
         with:
           name: linux-binaries-amd64
           path: artifacts
-          flat: true
 
       - name: Download Linux ARM64 binaries
         uses: actions/download-artifact@v4
         with:
           name: linux-binaries-arm64
           path: artifacts
-          flat: true
 
       - name: Download Android ARM64 binary
         uses: actions/download-artifact@v4
         with:
           name: android-arm64-server
           path: artifacts
-          flat: true
 
       - name: Download Android ARM binary
         uses: actions/download-artifact@v4
         with:
           name: android-arm-server
           path: artifacts
-          flat: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
